@@ -403,23 +403,25 @@ exports.updateProduct = asyncHandler(async (req, res) => {
     }
   }
 
-  // Delete existing related data if new data provided
-  if (images) {
-    await prisma.productImage.deleteMany({ where: { productId: id } });
-  }
-  if (details) {
-    await prisma.productDetail.deleteMany({ where: { productId: id } });
-  }
-  if (specifications) {
-    await prisma.productSpecification.deleteMany({ where: { productId: id } });
-  }
-  if (sizes) {
-    await prisma.productSize.deleteMany({ where: { productId: id } });
-  }
+  // Transaction for updating related data
+  // This ensures that either everything updates or nothing does
+  await prisma.$transaction(async (tx) => {
+    // Delete existing related data if new data provided
+    if (images) {
+      await tx.productImage.deleteMany({ where: { productId: id } });
+    }
+    if (details) {
+      await tx.productDetail.deleteMany({ where: { productId: id } });
+    }
+    if (specifications) {
+      await tx.productSpecification.deleteMany({ where: { productId: id } });
+    }
+    if (sizes) {
+      await tx.productSize.deleteMany({ where: { productId: id } });
+    }
 
-  const product = await prisma.product.update({
-    where: { id },
-    data: {
+    // Prepare update data
+    const updateData = {
       name: name || existingProduct.name,
       slug,
       category: category ? category.toUpperCase() : existingProduct.category,
@@ -434,37 +436,53 @@ exports.updateProduct = asyncHandler(async (req, res) => {
       materials: materials !== undefined ? materials : existingProduct.materials,
       origin: origin !== undefined ? origin : existingProduct.origin,
       brand: brand !== undefined ? brand : existingProduct.brand,
-      ...(images && {
-        images: {
-          create: images.map((img, index) => ({
-            url: img.url,
-            isMain: img.isMain || index === 0,
-            order: img.order !== undefined ? img.order : index,
-          })),
-        },
-      }),
-      ...(details && {
-        details: {
-          create: details.filter(d => d.detail || d).map((d, index) => ({
-            detail: typeof d === 'string' ? d : d.detail,
-            order: d.order !== undefined ? d.order : index,
-          })),
-        },
-      }),
-      ...(specifications && {
-        specifications: {
-          create: specifications.filter(s => s.key && s.value),
-        },
-      }),
-      ...(sizes && {
-        sizes: {
-          create: sizes.filter(s => s.size).map(s => ({
-            size: s.size,
-            stock: parseInt(s.stock) || 0,
-          })),
-        },
-      }),
-    },
+    };
+
+    // Add create operations for related data if provided
+    if (images) {
+      updateData.images = {
+        create: images.map((img, index) => ({
+          url: img.url,
+          isMain: img.isMain || index === 0,
+          order: img.order !== undefined ? img.order : index,
+        })),
+      };
+    }
+
+    if (details) {
+      updateData.details = {
+        create: details.filter(d => d.detail || d).map((d, index) => ({
+          detail: typeof d === 'string' ? d : d.detail,
+          order: d.order !== undefined ? d.order : index,
+        })),
+      };
+    }
+
+    if (specifications) {
+      updateData.specifications = {
+        create: specifications.filter(s => s.key && s.value),
+      };
+    }
+
+    if (sizes) {
+      updateData.sizes = {
+        create: sizes.filter(s => s.size).map(s => ({
+          size: s.size,
+          stock: parseInt(s.stock) || 0,
+        })),
+      };
+    }
+
+    // Perform the update
+    await tx.product.update({
+      where: { id },
+      data: updateData,
+    });
+  });
+
+  // Fetch updated product to return
+  const updatedProduct = await prisma.product.findUnique({
+    where: { id },
     include: {
       images: true,
       details: true,
@@ -480,7 +498,7 @@ exports.updateProduct = asyncHandler(async (req, res) => {
       await createNotification({
         userId: admin.id,
         title: 'Low Stock Alert',
-        message: `Product "${product.name}" is running low (${product.stockCount} left).`,
+        message: `Product "${updatedProduct.name}" is running low (${updatedProduct.stockCount} left).`,
         type: 'alert',
         link: `/admin/products/edit/${id}`,
       });
@@ -490,7 +508,7 @@ exports.updateProduct = asyncHandler(async (req, res) => {
   res.status(200).json({
     status: 'success',
     data: {
-      product,
+      product: updatedProduct,
     },
   });
 });

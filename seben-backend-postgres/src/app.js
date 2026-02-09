@@ -1,4 +1,4 @@
-// src/app.js
+// backend/src/app.js
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -6,8 +6,6 @@ const morgan = require('morgan');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const userRoutes = require('./routes/userRoutes');
-const uploadRoutes = require('./routes/uploadRoutes');
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
@@ -15,6 +13,8 @@ const productRoutes = require('./routes/productRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const customerRoutes = require('./routes/customerRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
+const userRoutes = require('./routes/userRoutes');
+const uploadRoutes = require('./routes/uploadRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 
 // Import middleware
@@ -29,6 +29,7 @@ app.set('trust proxy', 1);
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }, // Allow images to be loaded
 }));
 
 // Enable CORS
@@ -65,6 +66,10 @@ const limiter = rateLimit({
 // Apply rate limiting to /api routes
 app.use('/api/', limiter);
 
+// Serve uploaded files statically
+// This must be BEFORE the 404 handler
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
@@ -72,7 +77,6 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/users', userRoutes);
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/notifications', notificationRoutes);
 

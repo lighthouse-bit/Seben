@@ -1,11 +1,11 @@
-// src/controllers/authController.js
+// backend/src/controllers/authController.js
 const asyncHandler = require('express-async-handler');
 const authService = require('../services/authService');
 const { validationResult } = require('express-validator');
+const { createNotification } = require('./notificationController'); // Import notification helper
 
 // Register user
 exports.register = asyncHandler(async (req, res) => {
-  // Check for validation errors
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({
@@ -16,7 +16,6 @@ exports.register = asyncHandler(async (req, res) => {
 
   const { name, email, password, phone } = req.body;
 
-  // Check if user exists
   const existingUser = await authService.findUserByEmail(email);
   if (existingUser) {
     return res.status(400).json({
@@ -25,7 +24,6 @@ exports.register = asyncHandler(async (req, res) => {
     });
   }
 
-  // Create user
   const user = await authService.createUser({
     name,
     email,
@@ -33,15 +31,21 @@ exports.register = asyncHandler(async (req, res) => {
     phone,
   });
 
-  // Generate token
   const token = authService.generateToken(user.id);
+
+  // Notify user of welcome
+  await createNotification({
+    userId: user.id,
+    title: 'Welcome to Seben',
+    message: 'Your account has been successfully created.',
+    type: 'success',
+    link: '/account'
+  });
 
   res.status(201).json({
     status: 'success',
     token,
-    data: {
-      user,
-    },
+    data: { user },
   });
 });
 
@@ -49,7 +53,6 @@ exports.register = asyncHandler(async (req, res) => {
 exports.login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  // Validate input
   if (!email || !password) {
     return res.status(400).json({
       status: 'error',
@@ -57,10 +60,8 @@ exports.login = asyncHandler(async (req, res) => {
     });
   }
 
-  // Find user
   const user = await authService.findUserByEmail(email);
   
-  // Check if user exists and password is correct
   if (!user || !(await authService.comparePasswords(password, user.password))) {
     return res.status(401).json({
       status: 'error',
@@ -68,7 +69,6 @@ exports.login = asyncHandler(async (req, res) => {
     });
   }
 
-  // Check if user is active
   if (!user.active) {
     return res.status(401).json({
       status: 'error',
@@ -76,21 +76,14 @@ exports.login = asyncHandler(async (req, res) => {
     });
   }
 
-  // Update last login
   await authService.updateLastLogin(user.id);
-
-  // Generate token
   const token = authService.generateToken(user.id);
-
-  // Remove password from response
   delete user.password;
 
   res.status(200).json({
     status: 'success',
     token,
-    data: {
-      user,
-    },
+    data: { user },
   });
 });
 
@@ -105,10 +98,8 @@ exports.adminLogin = asyncHandler(async (req, res) => {
     });
   }
 
-  // Find admin user
   const user = await authService.findUserByEmail(email);
   
-  // Check if user exists, is admin, and password is correct
   if (!user || user.role !== 'ADMIN' || !(await authService.comparePasswords(password, user.password))) {
     return res.status(401).json({
       status: 'error',
@@ -116,33 +107,34 @@ exports.adminLogin = asyncHandler(async (req, res) => {
     });
   }
 
-  // Update last login
   await authService.updateLastLogin(user.id);
-
-  // Generate token
   const token = authService.generateToken(user.id);
 
-  // Remove password from response
+  // --- TRIGGER NOTIFICATION HERE ---
+  await createNotification({
+    userId: user.id,
+    title: 'Security Alert',
+    message: `New login detected from Admin dashboard at ${new Date().toLocaleTimeString()}`,
+    type: 'info',
+    link: '/admin/settings'
+  });
+  // ---------------------------------
+
   delete user.password;
 
   res.status(200).json({
     status: 'success',
     token,
-    data: {
-      user,
-    },
+    data: { user },
   });
 });
 
 // Get current user
 exports.getMe = asyncHandler(async (req, res) => {
   const user = await authService.findUserById(req.user.id);
-
   res.status(200).json({
     status: 'success',
-    data: {
-      user,
-    },
+    data: { user },
   });
 });
 
@@ -165,9 +157,7 @@ exports.updateProfile = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
-    data: {
-      user,
-    },
+    data: { user },
   });
 });
 
@@ -176,29 +166,33 @@ exports.changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const prisma = require('../config/database').getInstance();
 
-  // Get user with password
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
   });
 
-  // Check current password
-  if (!(await authService.comparePasswords(currentPassword, user.password))) {
+  if (!user || !(await authService.comparePasswords(currentPassword, user.password))) {
     return res.status(401).json({
       status: 'error',
       message: 'Current password is incorrect',
     });
   }
 
-  // Hash new password
   const hashedPassword = await authService.hashPassword(newPassword);
 
-  // Update password
   await prisma.user.update({
     where: { id: req.user.id },
     data: { password: hashedPassword },
   });
 
-  // Generate new token
+  // Notify user of password change
+  await createNotification({
+    userId: user.id,
+    title: 'Security Update',
+    message: 'Your password was successfully changed.',
+    type: 'success',
+    link: '/account/security'
+  });
+
   const token = authService.generateToken(user.id);
 
   res.status(200).json({

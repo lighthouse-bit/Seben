@@ -6,20 +6,34 @@ const { protect, restrictTo } = require('../middleware/auth');
 const router = express.Router();
 
 // Upload images (Admin only)
-router.post('/', protect, restrictTo('ADMIN'), upload.array('images', 10), (req, res) => {
-  if (!req.files) {
-    return res.status(400).json({ message: 'No files uploaded' });
-  }
+router.post('/', protect, restrictTo('ADMIN'), (req, res) => {
+  upload.array('images', 10)(req, res, (err) => {
+    if (err) {
+      console.error('Upload Error:', err);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: err.message || 'File upload failed' 
+      });
+    }
 
-  const files = req.files.map(file => ({
-    url: `/uploads/${file.filename}`,
-    filename: file.filename,
-    originalName: file.originalname
-  }));
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'No files uploaded' 
+      });
+    }
 
-  res.status(200).json({
-    status: 'success',
-    data: { files }
+    // Return the relative path that will be stored in the DB
+    const files = req.files.map(file => ({
+      url: `/uploads/products/${file.filename}`, // Note the /products/ part
+      filename: file.filename,
+      originalName: file.originalname
+    }));
+
+    res.status(200).json({
+      status: 'success',
+      data: { files } // Frontend expects { files: [...] } inside data
+    });
   });
 });
 

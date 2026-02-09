@@ -1,15 +1,24 @@
 // backend/src/config/multer.js
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
+
+// Ensure upload directory exists
+const uploadDir = path.join(__dirname, '../../uploads/products');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
 // Storage engine
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/products');
+    cb(null, uploadDir); // Use the absolute path we created above
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    // Sanitize original name
+    const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+    cb(null, file.fieldname + '-' + uniqueSuffix + '-' + sanitizedName);
   }
 });
 
@@ -22,7 +31,7 @@ const fileFilter = (req, file, cb) => {
   if (mimetype && extname) {
     return cb(null, true);
   } else {
-    cb(new Error('Only images are allowed'));
+    cb(new Error('Only images (jpeg, jpg, png, webp) are allowed'));
   }
 };
 
