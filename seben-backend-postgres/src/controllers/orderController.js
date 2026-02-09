@@ -1,6 +1,7 @@
 // src/controllers/orderController.js
 const asyncHandler = require('express-async-handler');
 const database = require('../config/database');
+const { createNotification } = require('./notificationController');
 
 const prisma = database.getInstance();
 
@@ -90,6 +91,33 @@ exports.createOrder = asyncHandler(async (req, res) => {
         stockCount: { decrement: item.quantity },
         sold: { increment: item.quantity },
       },
+    });
+  }
+
+  // 1. Notify User (if logged in)
+  if (userId) {
+    await createNotification({
+      userId,
+      title: 'Order Placed Successfully',
+      message: `Your order #${orderId} has been placed. We will notify you when it ships.`,
+      type: 'success',
+      link: `/account/orders/${order.id}`,
+    });
+  }
+
+  // 2. Notify Admins
+  const admins = await prisma.user.findMany({
+    where: { role: 'ADMIN' },
+    select: { id: true },
+  });
+
+  for (const admin of admins) {
+    await createNotification({
+      userId: admin.id,
+      title: 'New Order Received',
+      message: `Order #${orderId} placed by ${customerName}. Total: $${total}`,
+      type: 'order',
+      link: `/admin/orders/${order.id}`,
     });
   }
 
@@ -341,6 +369,24 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
       },
     },
   });
+
+  // Notify user about status change
+  if (order.userId) {
+    let message = `Your order #${order.orderId} status has been updated to ${status}.`;
+    if (status === 'SHIPPED') {
+      message = `Your order #${order.orderId} has been shipped! Tracking: ${trackingNumber || 'N/A'}`;
+    } else if (status === 'DELIVERED') {
+      message = `Your order #${order.orderId} has been delivered. Enjoy your purchase!`;
+    }
+
+    await createNotification({
+      userId: order.userId,
+      title: 'Order Status Updated',
+      message,
+      type: 'info',
+      link: `/account/orders/${order.id}`,
+    });
+  }
 
   res.status(200).json({
     status: 'success',

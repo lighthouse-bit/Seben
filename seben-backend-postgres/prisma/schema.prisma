@@ -32,6 +32,7 @@ model User {
   wishlist              Wishlist[]
   cart                  CartItem[]
   reviews               Review[]
+  notifications         Notification[] 
   
   @@index([email])
 }
@@ -341,4 +342,23 @@ enum PaymentMethod {
   CARD
   PAYPAL
   STRIPE
+}
+
+
+
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String   @default("info")
+  read      Boolean  @default(false)
+  link      String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([createdAt])
 }

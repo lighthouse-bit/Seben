@@ -1,6 +1,7 @@
 // backend/src/controllers/productController.js
 const asyncHandler = require('express-async-handler');
 const database = require('../config/database');
+const { createNotification } = require('./notificationController');
 
 const prisma = database.getInstance();
 
@@ -333,6 +334,20 @@ exports.createProduct = asyncHandler(async (req, res) => {
     },
   });
 
+  // Notify admins if low stock upon creation (rare but possible)
+  if (parseInt(stockCount) < 5) {
+    const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true } });
+    for (const admin of admins) {
+      await createNotification({
+        userId: admin.id,
+        title: 'Low Stock Alert',
+        message: `Product "${name}" created with low stock (${stockCount} units).`,
+        type: 'alert',
+        link: `/admin/products/edit/${product.id}`,
+      });
+    }
+  }
+
   res.status(201).json({
     status: 'success',
     data: {
@@ -457,6 +472,20 @@ exports.updateProduct = asyncHandler(async (req, res) => {
       sizes: true,
     },
   });
+
+  // Notify admins if low stock
+  if (stockCount !== undefined && parseInt(stockCount) < 5) {
+    const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true } });
+    for (const admin of admins) {
+      await createNotification({
+        userId: admin.id,
+        title: 'Low Stock Alert',
+        message: `Product "${product.name}" is running low (${product.stockCount} left).`,
+        type: 'alert',
+        link: `/admin/products/edit/${id}`,
+      });
+    }
+  }
 
   res.status(200).json({
     status: 'success',
