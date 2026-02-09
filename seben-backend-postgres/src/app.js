@@ -64,7 +64,7 @@ const limiter = rateLimit({
 });
 
 // Apply rate limiting to /api routes
-app.use('/api/', limiter);
+// app.use('/api/', limiter);
 
 // Serve uploaded files statically
 // This must be BEFORE the 404 handler

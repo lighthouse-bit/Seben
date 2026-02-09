@@ -161,13 +161,7 @@ exports.getAllOrders = asyncHandler(async (req, res) => {
       where,
       include: {
         items: true,
-        user: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
-        },
+        user: true, // Make sure user is included if you use it
       },
       orderBy: { [sortBy]: order },
       skip,
@@ -180,10 +174,10 @@ exports.getAllOrders = asyncHandler(async (req, res) => {
     status: 'success',
     results: orders.length,
     total,
-    totalPages: Math.ceil(total / limit),
+    totalPages: Math.ceil(total / parseInt(limit)),
     currentPage: parseInt(page),
     data: {
-      orders,
+      orders, // Frontend looks for response.data.orders
     },
   });
 });
