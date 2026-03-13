@@ -10,7 +10,7 @@ import AdminLayout from './components/layout/AdminLayout'
 
 // Public Pages
 import Home from './pages/public/Home'
-import Shop from './pages/public/Shop'
+import Shop from './pages/public/ShopPage'  
 import ProductDetail from './pages/public/ProductDetail'
 import CartPage from './pages/public/Cart'
 import Checkout from './pages/public/Checkout'
