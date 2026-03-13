@@ -93,10 +93,10 @@ const CheckoutSuccess = () => {
 
       <div className="flex gap-4">
         <Link to="/account/orders" className="btn-outline">
-          View Order.
+          View Order
         </Link>
         <Link to="/shop" className="btn-primary">
-          Continue Shopping..
+          Continue Shopping
         </Link>
       </div>
     </div>
