@@ -2,6 +2,7 @@
 const asyncHandler = require('express-async-handler');
 const database = require('../config/database');
 const { createNotification } = require('./notificationController');
+const stripe = require('../config/stripe');
 
 const prisma = database.getInstance();
 
@@ -11,7 +12,7 @@ const generateOrderId = async () => {
   return `ORD-${String(count + 1).padStart(6, '0')}`;
 };
 
-// Create order
+// 1. Create order (Manual/COD)
 exports.createOrder = asyncHandler(async (req, res) => {
   const {
     userId,
@@ -31,7 +32,6 @@ exports.createOrder = asyncHandler(async (req, res) => {
     couponCode,
   } = req.body;
 
-  // Validate required fields
   if (!customerName || !customerEmail || !items || items.length === 0) {
     return res.status(400).json({
       status: 'error',
@@ -39,10 +39,8 @@ exports.createOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  // Generate order ID
   const orderId = await generateOrderId();
 
-  // Create order with items
   const order = await prisma.order.create({
     data: {
       orderId,
@@ -83,7 +81,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
     },
   });
 
-  // Update product stock
+  // Update stock
   for (const item of items) {
     await prisma.product.update({
       where: { id: item.productId },
@@ -94,7 +92,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  // 1. Notify User (if logged in)
+  // Notify User
   if (userId) {
     await createNotification({
       userId,
@@ -105,7 +103,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
     });
   }
 
-  // 2. Notify Admins
+  // Notify Admins
   const admins = await prisma.user.findMany({
     where: { role: 'ADMIN' },
     select: { id: true },
@@ -123,13 +121,209 @@ exports.createOrder = asyncHandler(async (req, res) => {
 
   res.status(201).json({
     status: 'success',
-    data: {
-      order,
-    },
+    data: { order },
   });
 });
 
-// Get all orders (Admin)
+// 2. Create Stripe Checkout Session
+exports.createCheckoutSession = asyncHandler(async (req, res) => {
+  const { items, shippingAddress, customerEmail, userId } = req.body;
+
+  if (!items || items.length === 0) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'No items in checkout',
+    });
+  }
+
+  const lineItems = items.map((item) => {
+    // Ensure image is a valid absolute URL for Stripe
+    const images = item.image && item.image.startsWith('http') 
+      ? [item.image] 
+      : []; 
+
+    return {
+      price_data: {
+        currency: 'usd',
+        product_data: {
+          name: item.name,
+          images: images,
+          metadata: {
+            productId: item.productId,
+            size: item.size || '',
+          },
+        },
+        unit_amount: Math.round(item.price * 100),
+      },
+      quantity: item.quantity,
+    };
+  });
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: lineItems,
+      mode: 'payment',
+      success_url: `${process.env.CLIENT_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/checkout?canceled=true`,
+      customer_email: customerEmail,
+      metadata: {
+        userId: userId || null,
+        shippingName: `${shippingAddress.firstName} ${shippingAddress.lastName}`,
+      },
+    });
+
+    res.status(200).json({
+      status: 'success',
+      sessionId: session.id,
+      url: session.url,
+    });
+  } catch (error) {
+    console.error('Stripe Error:', error);
+    res.status(400).json({
+      status: 'error',
+      message: error.message,
+    });
+  }
+});
+
+// 3. Verify Payment and Create Order (Stripe)
+exports.verifyPaymentAndCreateOrder = asyncHandler(async (req, res) => {
+  const { sessionId, orderData } = req.body;
+
+  console.log("------------------------------------------");
+  console.log("🔵 VERIFYING PAYMENT START");
+  console.log("Session ID:", sessionId);
+
+  if (!sessionId || !orderData) {
+    console.error("❌ Missing session ID or order data");
+    return res.status(400).json({ status: 'error', message: 'Missing data' });
+  }
+
+  try {
+    // 1. Verify Stripe Session
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    console.log("✅ Stripe Status:", session.payment_status);
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ status: 'error', message: 'Payment not verified' });
+    }
+
+    // 2. Check for Duplicates
+    const existingOrder = await prisma.order.findFirst({
+      where: { stripeSessionId: sessionId },
+    });
+
+    if (existingOrder) {
+      console.log("⚠️ Order already exists:", existingOrder.orderId);
+      return res.status(200).json({ status: 'success', data: { order: existingOrder } });
+    }
+
+    // 3. Validate Product IDs before creation
+    const { items, shippingAddress, userId, customerName, customerEmail, customerPhone } = orderData;
+    
+    // Check if products actually exist in DB
+    const productIds = items.map(i => i.productId);
+    const validProducts = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+      select: { id: true }
+    });
+
+    const validIdSet = new Set(validProducts.map(p => p.id));
+    const invalidItems = items.filter(i => !validIdSet.has(i.productId));
+
+    if (invalidItems.length > 0) {
+      console.error("❌ FATAL: Cart contains products that do not exist in DB:", invalidItems);
+      return res.status(400).json({ 
+        status: 'error', 
+        message: 'Cart contains invalid products. Please clear cart and try again.' 
+      });
+    }
+
+    // 4. Create Order
+    console.log("🔵 Attempting to create order in DB...");
+    const orderId = await generateOrderId();
+
+    const order = await prisma.order.create({
+      data: {
+        orderId,
+        userId: userId || null,
+        customerName,
+        customerEmail,
+        customerPhone,
+        shippingAddress,
+        paymentMethod: 'STRIPE',
+        paymentInfo: { id: session.payment_intent, status: session.payment_status },
+        subtotal: session.amount_subtotal / 100,
+        total: session.amount_total / 100,
+        tax: 0,
+        shipping: 0,
+        status: 'PROCESSING',
+        stripeSessionId: sessionId,
+        items: {
+          create: items.map((item) => ({
+            productId: item.productId,
+            name: item.name,
+            price: parseFloat(item.price),
+            quantity: parseInt(item.quantity),
+            size: item.size || null,
+            image: item.image || null,
+          })),
+        },
+        statusHistory: {
+          create: { status: 'PROCESSING', note: 'Payment successful via Stripe' },
+        },
+      },
+    });
+
+    console.log("✅ ORDER CREATED SUCCESSFULLY:", order.orderId);
+
+    // 5. Update Stock
+    for (const item of items) {
+      await prisma.product.update({
+        where: { id: item.productId },
+        data: {
+          stockCount: { decrement: parseInt(item.quantity) },
+          sold: { increment: parseInt(item.quantity) },
+        },
+      }).catch(e => console.warn("Stock update warning:", e.message));
+    }
+
+    // 6. Notifications
+    try {
+      if (userId) {
+        await createNotification({
+          userId,
+          title: 'Order Placed Successfully',
+          message: `Your order #${orderId} has been placed.`,
+          type: 'success',
+          link: `/account/orders/${order.id}`,
+        });
+      }
+      
+      const admins = await prisma.user.findMany({ where: { role: 'ADMIN' }, select: { id: true } });
+      for (const admin of admins) {
+        await createNotification({
+          userId: admin.id,
+          title: 'New Order Received',
+          message: `Order #${orderId} placed by ${customerName}.`,
+          type: 'order',
+          link: `/admin/orders/${order.id}`,
+        });
+      }
+    } catch (notifError) {
+      console.warn("Notification error (non-fatal):", notifError.message);
+    }
+
+    res.status(201).json({ status: 'success', data: { order } });
+
+  } catch (error) {
+    console.error("❌ CRITICAL DB ERROR:", error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// 4. Get all orders (Admin)
 exports.getAllOrders = asyncHandler(async (req, res) => {
   const {
     status,
@@ -154,14 +348,14 @@ exports.getAllOrders = asyncHandler(async (req, res) => {
     ];
   }
 
-  const skip = (page - 1) * limit;
+  const skip = (parseInt(page) - 1) * parseInt(limit);
 
   const [orders, total] = await Promise.all([
     prisma.order.findMany({
       where,
       include: {
         items: true,
-        user: true, // Make sure user is included if you use it
+        user: { select: { id: true, name: true, email: true } },
       },
       orderBy: { [sortBy]: order },
       skip,
@@ -176,13 +370,11 @@ exports.getAllOrders = asyncHandler(async (req, res) => {
     total,
     totalPages: Math.ceil(total / parseInt(limit)),
     currentPage: parseInt(page),
-    data: {
-      orders, // Frontend looks for response.data.orders
-    },
+    data: { orders },
   });
 });
 
-// Get order by ID (Admin)
+// 5. Get order by ID (Admin)
 exports.getOrderById = asyncHandler(async (req, res) => {
   const order = await prisma.order.findUnique({
     where: { id: req.params.id },
@@ -193,28 +385,14 @@ exports.getOrderById = asyncHandler(async (req, res) => {
             select: {
               id: true,
               name: true,
-              images: {
-                where: { isMain: true },
-                take: 1,
-              },
+              images: { where: { isMain: true }, take: 1 },
             },
           },
         },
       },
-      user: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          phone: true,
-        },
-      },
-      notes: {
-        orderBy: { addedAt: 'desc' },
-      },
-      statusHistory: {
-        orderBy: { changedAt: 'desc' },
-      },
+      user: { select: { id: true, name: true, email: true, phone: true } },
+      notes: { orderBy: { addedAt: 'desc' } },
+      statusHistory: { orderBy: { changedAt: 'desc' } },
     },
   });
 
@@ -227,13 +405,11 @@ exports.getOrderById = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
-    data: {
-      order,
-    },
+    data: { order },
   });
 });
 
-// Track order (Public)
+// 6. Track order (Public)
 exports.trackOrder = asyncHandler(async (req, res) => {
   const order = await prisma.order.findUnique({
     where: { orderId: req.params.orderId },
@@ -245,14 +421,7 @@ exports.trackOrder = asyncHandler(async (req, res) => {
       estimatedDelivery: true,
       deliveredAt: true,
       createdAt: true,
-      statusHistory: {
-        orderBy: { changedAt: 'asc' },
-        select: {
-          status: true,
-          changedAt: true,
-          note: true,
-        },
-      },
+      statusHistory: { orderBy: { changedAt: 'asc' }, select: { status: true, changedAt: true, note: true } },
     },
   });
 
@@ -265,21 +434,24 @@ exports.trackOrder = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
-    data: {
-      order,
-    },
+    data: { order },
   });
 });
 
-// Get my orders (User)
+// 7. Get my orders (User)
 exports.getMyOrders = asyncHandler(async (req, res) => {
+  const currentUserId = req.user.id;
+  console.log("🔍 Fetching orders for USER ID:", currentUserId);
+
   const orders = await prisma.order.findMany({
-    where: { userId: req.user.id },
+    where: { userId: currentUserId },
     include: {
       items: true,
     },
     orderBy: { createdAt: 'desc' },
   });
+
+  console.log(`✅ Found ${orders.length} orders for user.`);
 
   res.status(200).json({
     status: 'success',
@@ -290,7 +462,7 @@ exports.getMyOrders = asyncHandler(async (req, res) => {
   });
 });
 
-// Get my order by ID (User)
+// 8. Get my order by ID (User)
 exports.getMyOrderById = asyncHandler(async (req, res) => {
   const order = await prisma.order.findFirst({
     where: {
@@ -299,9 +471,7 @@ exports.getMyOrderById = asyncHandler(async (req, res) => {
     },
     include: {
       items: true,
-      statusHistory: {
-        orderBy: { changedAt: 'desc' },
-      },
+      statusHistory: { orderBy: { changedAt: 'desc' } },
     },
   });
 
@@ -314,13 +484,11 @@ exports.getMyOrderById = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
-    data: {
-      order,
-    },
+    data: { order },
   });
 });
 
-// Update order status (Admin)
+// 9. Update order status (Admin)
 exports.updateOrderStatus = asyncHandler(async (req, res) => {
   const { status, note, trackingNumber, carrier, estimatedDelivery } = req.body;
 
@@ -335,9 +503,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  const updateData = {
-    status: status.toUpperCase(),
-  };
+  const updateData = { status: status.toUpperCase() };
 
   if (trackingNumber) updateData.trackingNumber = trackingNumber;
   if (carrier) updateData.carrier = carrier;
@@ -356,22 +522,13 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
         },
       },
     },
-    include: {
-      items: true,
-      statusHistory: {
-        orderBy: { changedAt: 'desc' },
-      },
-    },
+    include: { items: true, statusHistory: { orderBy: { changedAt: 'desc' } } },
   });
 
-  // Notify user about status change
   if (order.userId) {
     let message = `Your order #${order.orderId} status has been updated to ${status}.`;
-    if (status === 'SHIPPED') {
-      message = `Your order #${order.orderId} has been shipped! Tracking: ${trackingNumber || 'N/A'}`;
-    } else if (status === 'DELIVERED') {
-      message = `Your order #${order.orderId} has been delivered. Enjoy your purchase!`;
-    }
+    if (status === 'SHIPPED') message = `Your order #${order.orderId} has been shipped! Tracking: ${trackingNumber || 'N/A'}`;
+    else if (status === 'DELIVERED') message = `Your order #${order.orderId} has been delivered. Enjoy your purchase!`;
 
     await createNotification({
       userId: order.userId,
@@ -384,37 +541,27 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     status: 'success',
-    data: {
-      order: updatedOrder,
-    },
+    data: { order: updatedOrder },
   });
 });
 
-// Update order (Admin)
+// 10. Update order (Admin)
 exports.updateOrder = asyncHandler(async (req, res) => {
   const { shippingAddress, billingAddress, customerPhone } = req.body;
 
   const order = await prisma.order.update({
     where: { id: req.params.id },
-    data: {
-      shippingAddress,
-      billingAddress,
-      customerPhone,
-    },
-    include: {
-      items: true,
-    },
+    data: { shippingAddress, billingAddress, customerPhone },
+    include: { items: true },
   });
 
   res.status(200).json({
     status: 'success',
-    data: {
-      order,
-    },
+    data: { order },
   });
 });
 
-// Add order note (Admin)
+// 11. Add order note (Admin)
 exports.addOrderNote = asyncHandler(async (req, res) => {
   const { text } = req.body;
 
@@ -428,13 +575,11 @@ exports.addOrderNote = asyncHandler(async (req, res) => {
 
   res.status(201).json({
     status: 'success',
-    data: {
-      note,
-    },
+    data: { note },
   });
 });
 
-// Delete order (Admin)
+// 12. Delete order (Admin)
 exports.deleteOrder = asyncHandler(async (req, res) => {
   await prisma.order.delete({
     where: { id: req.params.id },
@@ -446,7 +591,7 @@ exports.deleteOrder = asyncHandler(async (req, res) => {
   });
 });
 
-// Get order stats (Admin)
+// 13. Get order stats (Admin)
 exports.getOrderStats = asyncHandler(async (req, res) => {
   const [total, pending, processing, shipped, delivered, cancelled] = await Promise.all([
     prisma.order.count(),

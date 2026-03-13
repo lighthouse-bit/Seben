@@ -85,11 +85,8 @@ exports.addAddress = asyncHandler(async (req, res) => {
 
 // Update address
 exports.updateAddress = asyncHandler(async (req, res) => {
-  const address = await prisma.address.updateMany({
-    where: {
-      id: req.params.id,
-      userId: req.user.id,
-    },
+  const address = await prisma.address.update({ // Changed from updateMany to update if using ID
+    where: { id: req.params.id },
     data: req.body,
   });
 
@@ -101,11 +98,8 @@ exports.updateAddress = asyncHandler(async (req, res) => {
 
 // Delete address
 exports.deleteAddress = asyncHandler(async (req, res) => {
-  await prisma.address.deleteMany({
-    where: {
-      id: req.params.id,
-      userId: req.user.id,
-    },
+  await prisma.address.delete({
+    where: { id: req.params.id },
   });
 
   res.status(204).json({
@@ -159,6 +153,21 @@ exports.getWishlist = asyncHandler(async (req, res) => {
 exports.addToWishlist = asyncHandler(async (req, res) => {
   const { productId } = req.body;
 
+  // Check if exists first to avoid error
+  const existing = await prisma.wishlist.findFirst({
+    where: {
+      userId: req.user.id,
+      productId,
+    }
+  });
+
+  if (existing) {
+    return res.status(200).json({
+      status: 'success',
+      data: { wishlist: existing },
+    });
+  }
+
   const wishlistItem = await prisma.wishlist.create({
     data: {
       userId: req.user.id,
@@ -177,10 +186,13 @@ exports.addToWishlist = asyncHandler(async (req, res) => {
 
 // Remove from wishlist
 exports.removeFromWishlist = asyncHandler(async (req, res) => {
+  const { productId } = req.params;
+
+  // Delete using deleteMany because we don't have the wishlist ID, only product ID + User ID
   await prisma.wishlist.deleteMany({
     where: {
       userId: req.user.id,
-      productId: req.params.productId,
+      productId: productId,
     },
   });
 
@@ -191,7 +203,6 @@ exports.removeFromWishlist = asyncHandler(async (req, res) => {
 
 // Get settings
 exports.getSettings = asyncHandler(async (req, res) => {
-  // Return user preferences/settings
   const settings = {
     emailNotifications: true,
     orderUpdates: true,
@@ -207,8 +218,6 @@ exports.getSettings = asyncHandler(async (req, res) => {
 
 // Update settings
 exports.updateSettings = asyncHandler(async (req, res) => {
-  // Update user settings (you might want to create a Settings model)
-  
   res.status(200).json({
     status: 'success',
     data: { settings: req.body },

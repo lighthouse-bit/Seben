@@ -23,6 +23,9 @@ exports.protect = asyncHandler(async (req, res, next) => {
   try {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
+    // DEBUG: Print User ID from token
+    console.log(`🔑 Auth Middleware: Verified Token for User ID: ${decoded.id}`);
 
     // Check if user still exists
     const user = await prisma.user.findUnique({
@@ -36,6 +39,7 @@ exports.protect = asyncHandler(async (req, res, next) => {
     });
 
     if (!user) {
+      console.error(`❌ Auth Error: User ID ${decoded.id} found in token but NOT in database.`);
       return res.status(401).json({
         status: 'error',
         message: 'The user belonging to this token no longer exists.',
@@ -46,6 +50,7 @@ exports.protect = asyncHandler(async (req, res, next) => {
     req.user = user;
     next();
   } catch (error) {
+    console.error('❌ Auth Middleware Error:', error.message);
     return res.status(401).json({
       status: 'error',
       message: 'Invalid token. Please log in again.',
@@ -56,6 +61,7 @@ exports.protect = asyncHandler(async (req, res, next) => {
 exports.restrictTo = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
+      console.warn(`⛔ Access Denied: User role ${req.user.role} is not in allowed roles [${roles}]`);
       return res.status(403).json({
         status: 'error',
         message: 'You do not have permission to perform this action',
